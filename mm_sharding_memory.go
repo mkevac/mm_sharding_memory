@@ -28,6 +28,7 @@ type Country struct {
 	PhotoSlabsMem  uint64
 	TotalMem       uint64
 	TotalMemWillBe uint64
+	Romances       uint64
 }
 
 type Server struct {
@@ -57,6 +58,7 @@ func getMeetmakersMemStat(meetmakers *Meetmakers) error {
 		j          int
 		userSlabs  uint64
 		photoSlabs uint64
+		romances   uint64
 		err        error
 	}
 
@@ -82,12 +84,13 @@ func getMeetmakersMemStat(meetmakers *Meetmakers) error {
 			addr := fmt.Sprintf("%v:%v", meetmakers.Servers[i].Hostname, 13000+meetmakers.Servers[i].Countries[j].Id)
 
 			go func(addr string, i int, j int) {
-				userSlabs, photoSlabs, err := getMeetmakerMemStat(addr)
+				userSlabs, photoSlabs, romances, err := getMeetmakerMemStat(addr)
 				c <- rs{
 					i:          i,
 					j:          j,
 					userSlabs:  userSlabs,
 					photoSlabs: photoSlabs,
+					romances:   romances,
 					err:        err,
 				}
 				return
@@ -106,6 +109,7 @@ func getMeetmakersMemStat(meetmakers *Meetmakers) error {
 			progressBar.Increment()
 			meetmakers.Servers[res.i].Countries[res.j].UserSlabsMem = res.userSlabs
 			meetmakers.Servers[res.i].Countries[res.j].PhotoSlabsMem = res.photoSlabs
+			meetmakers.Servers[res.i].Countries[res.j].Romances = res.romances
 		}
 	}
 
@@ -114,30 +118,44 @@ func getMeetmakersMemStat(meetmakers *Meetmakers) error {
 	return nil
 }
 
-func getMeetmakerMemStat(addr string) (uint64, uint64, error) {
+func getMeetmakerMemStat(addr string) (uint64, uint64, uint64, error) {
 
 	result := struct {
 		UserSlabs  uint64 `json:"user_slabs"`
 		PhotoSlabs uint64 `json:"photo_slabs"`
+		Romances   uint64 `json:"romances"`
 	}{}
 
 	conn, err := net.DialTimeout("tcp", addr, time.Second*5)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
+
+	br := bufio.NewReader(conn)
 
 	fmt.Fprintf(conn, "service_stats_mem_usage {}\n")
 
-	bytes, err := bufio.NewReader(conn).ReadBytes('\n')
+	bytes, err := br.ReadBytes('\n')
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 
 	if err = json.Unmarshal(bytes[len("service_stats_mem_usage "):], &result); err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 
-	return result.UserSlabs, result.PhotoSlabs, nil
+	fmt.Fprintf(conn, "service_stats_general {}\n")
+
+	bytes, err = br.ReadBytes('\n')
+	if err != nil {
+		return 0, 0, 0, err
+	}
+
+	if err = json.Unmarshal(bytes[len("service_stats_general "):], &result); err != nil {
+		return 0, 0, 0, err
+	}
+
+	return result.UserSlabs, result.PhotoSlabs, result.Romances, nil
 }
 
 func getCountryConf(server string, config *ssh.ClientConfig) (CountryConfT, error) {
@@ -402,7 +420,6 @@ func getMeetmakers(sshConfig *ssh.ClientConfig) (Meetmakers, error) {
 
 func main() {
 	var shards = flag.Int("shards", 4, "shard count")
-	var votes_percent = flag.Float64("votes_percent", 0.42, "votes percent")
 	flag.Parse()
 
 	sshConfig := ssh.ClientConfig{
@@ -424,7 +441,8 @@ func main() {
 		serverMemWas := uint64(0)
 		for j, country := range server.Countries {
 			VoteSlabsMem := country.TotalMem - country.PhotoSlabsMem - country.UserSlabsMem
-			countryTotalMemWillBe := (country.UserSlabsMem + country.PhotoSlabsMem + uint64(float64(VoteSlabsMem)**votes_percent)) * uint64(*shards)
+			MemPerRomance := float64(VoteSlabsMem) / float64(country.Romances)
+			countryTotalMemWillBe := uint64(((1.0 / float64(*shards)) + ((float64(*shards)-1)/float64(*shards))*2) * float64(country.Romances) * MemPerRomance)
 			serverMemWas += country.TotalMem
 			serverMemWillBe += countryTotalMemWillBe
 			meetmakers.Servers[i].Countries[j].TotalMemWillBe = countryTotalMemWillBe
