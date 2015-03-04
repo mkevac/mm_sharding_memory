@@ -126,7 +126,6 @@ func getMeetmakerMemStat(addr string) (uint64, uint64, error) {
 		return 0, 0, err
 	}
 
-	conn.SetDeadline(time.Now().Add(time.Second * 5))
 	fmt.Fprintf(conn, "service_stats_mem_usage {}\n")
 
 	bytes, err := bufio.NewReader(conn).ReadBytes('\n')
