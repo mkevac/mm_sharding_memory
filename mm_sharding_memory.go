@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"database/sql"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/cheggaaa/pb"
 	"github.com/dustin/go-humanize"
 	_ "github.com/go-sql-driver/mysql"
 	"golang.org/x/crypto/ssh"
@@ -58,6 +60,21 @@ func getMeetmakersMemStat(meetmakers *Meetmakers) error {
 		err        error
 	}
 
+	totalCountries := 0
+
+	for i, _ := range meetmakers.Servers {
+		for range meetmakers.Servers[i].Countries {
+			totalCountries += 1
+		}
+	}
+
+	log.Println("Getting memory stats from meetmaker daemons...")
+	progressBar := pb.New(totalCountries * 2)
+	progressBar.ShowTimeLeft = false
+	progressBar.ShowCounters = false
+	progressBar.SetWidth(80)
+	progressBar.Start()
+
 	c := make(chan rs)
 
 	for i, _ := range meetmakers.Servers {
@@ -75,6 +92,8 @@ func getMeetmakersMemStat(meetmakers *Meetmakers) error {
 				}
 				return
 			}(addr, i, j)
+
+			progressBar.Increment()
 		}
 	}
 
@@ -84,10 +103,13 @@ func getMeetmakersMemStat(meetmakers *Meetmakers) error {
 			if res.err != nil {
 				return res.err
 			}
+			progressBar.Increment()
 			meetmakers.Servers[res.i].Countries[res.j].UserSlabsMem = res.userSlabs
 			meetmakers.Servers[res.i].Countries[res.j].PhotoSlabsMem = res.photoSlabs
 		}
 	}
+
+	progressBar.Finish()
 
 	return nil
 }
@@ -161,6 +183,13 @@ func getServersMemory(meetmakers *Meetmakers, sshConfig *ssh.ClientConfig) error
 		c   chan rs = make(chan rs)
 	)
 
+	log.Println("Getting memory stats from servers via ssh...")
+	progressBar := pb.New(len(meetmakers.Servers) * 2)
+	progressBar.ShowTimeLeft = false
+	progressBar.ShowCounters = false
+	progressBar.SetWidth(80)
+	progressBar.Start()
+
 	for i, s := range meetmakers.Servers {
 
 		go func(i int, server Server) {
@@ -168,20 +197,26 @@ func getServersMemory(meetmakers *Meetmakers, sshConfig *ssh.ClientConfig) error
 			c <- rs{i, server, err}
 		}(i, s)
 
+		progressBar.Increment()
+
 	}
 
 	for range meetmakers.Servers {
 		res := <-c
 		if res.err != nil {
 			err = res.err
+			progressBar.Increment()
 			continue
 		}
 		meetmakers.Servers[res.i] = res.server
+		progressBar.Increment()
 	}
 
 	if err != nil {
 		return err
 	}
+
+	progressBar.Finish()
 
 	return nil
 }
@@ -367,6 +402,9 @@ func getMeetmakers(sshConfig *ssh.ClientConfig) (Meetmakers, error) {
 }
 
 func main() {
+	var shards = flag.Int("shards", 4, "shard count")
+	var votes_percent = flag.Float64("votes_percent", 0.42, "votes percent")
+	flag.Parse()
 
 	sshConfig := ssh.ClientConfig{
 		User: os.Getenv("LOGNAME"),
@@ -382,14 +420,12 @@ func main() {
 		log.Fatal(err)
 	}
 
-	fmt.Println("meetmakers", meetmakers)
-
 	for i, server := range meetmakers.Servers {
 		serverMemWillBe := uint64(0)
 		serverMemWas := uint64(0)
 		for j, country := range server.Countries {
 			VoteSlabsMem := country.TotalMem - country.PhotoSlabsMem - country.UserSlabsMem
-			countryTotalMemWillBe := (country.UserSlabsMem + country.PhotoSlabsMem + uint64(float64(VoteSlabsMem)*0.42)) * 4
+			countryTotalMemWillBe := (country.UserSlabsMem + country.PhotoSlabsMem + uint64(float64(VoteSlabsMem)**votes_percent)) * uint64(*shards)
 			serverMemWas += country.TotalMem
 			serverMemWillBe += countryTotalMemWillBe
 			meetmakers.Servers[i].Countries[j].TotalMemWillBe = countryTotalMemWillBe
@@ -400,14 +436,14 @@ func main() {
 
 	for _, server := range meetmakers.Servers {
 
-		log.Printf("%v: %v -> %v (which is %.2f%% of total memory on server)\n",
+		fmt.Printf("%v: %v -> %v (which is %.2f%% of total memory on server)\n",
 			server.Hostname,
 			humanize.Bytes(server.AllCountriesMem),
 			humanize.Bytes(server.AllCountriesMemWillBe),
 			((float64(server.AllCountriesMemWillBe) / float64(server.TotalMem)) * 100.0))
 
 		for _, country := range server.Countries {
-			log.Printf("\t%v: %v -> %v\n",
+			fmt.Printf("\t%v: %v -> %v\n",
 				country.Name,
 				humanize.Bytes(country.TotalMem),
 				humanize.Bytes(country.TotalMemWillBe))
